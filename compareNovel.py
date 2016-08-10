@@ -260,7 +260,10 @@ def getMedianCoverage(pysam_alignment_file_object, chrom, start, end):
 for clust in clusters:
     clust['best_site'] = None
     clust['best_score'] = 0
+    logging.debug('Total sites in cluster: {}'.format(len(clust['sites'])))
     for i,site in enumerate(clust['sites']):
+        logging.debug('site index: {}'.format(i))
+        logging.debug('site: {}'.format(site))
         try:
             score = (int(site[16]) + int(site[17]) + int(site[18]) + int(site[19])) / int(site[15][1])
         except (ValueError, IndexError) as e:
@@ -269,26 +272,40 @@ for clust in clusters:
         if score > clust['best_score']:
             clust['best_site'] = site
             clust['best_score'] = score
+    if not clust['best_site']:
+        logging.debug('Skipped because no best site')
+        continue
     logging.debug('Best site: {}'.format(clust['best_site']))
     closest_utr3 = getClosestUtr3(clust['best_site'], utrs)
+    if not closest_utr3:
+        logging.debug('Skipped because no close utr3')
+        continue
     logging.debug('Closest utr3: {}'.format(closest_utr3))
     name = clust['best_site'][0]
     chrom = clust['best_site'][4]
     cs = int(clust['best_site'][6])
+    strand = clust['best_site'][10]
     utr3_start = int(closest_utr3[3])
     utr3_end = int(closest_utr3[4])
     if (utr3_start >= cs) or (utr3_end <= cs):
+        logging.debug('Skipped because cs not within utr3')
         continue
     #print '-'*(cs-utr3_start) + '|' + '-'*(utr3_end-cs)
     ccle_aln = pysam.AlignmentFile(getCcleCram(name), 'rc')
     left = getMedianCoverage(ccle_aln, chrom, utr3_start, cs)
     right = getMedianCoverage(ccle_aln, chrom, cs, utr3_end)
+    if strand == '-':
+        temp = right
+        right = left
+        left = temp
     try:
-        diff = abs(left - right)
+        diff = left - right
     except TypeError:
-        logging.error('TypeError abs(left - right)\nleft: "{}"\nright: "{}"')
+        logging.error('TypeError abs(left - right)\nleft: "{}"\nright: "{}"'.format(left, right))
         diff = 0
+    logging.debug('diff: {}'.format(diff))
     if diff <= args.threshold:
+        logging.debug('Skipped because diff is too low')
         continue
     novel_track = 'track name="Novel Site" description="Novel site {}" color="255,50,50" visibility=full\n'.format(cs)
     novel_track += '{}\t{}\t{}\t{}\n'.format(chrom, cs-1, cs, clust['best_score'])
@@ -305,36 +322,3 @@ for clust in clusters:
     pdf = soup.find_all('a')[-7]['href']
     pdf = 'http://genome.ucsc.edu/cgi-bin/' + pdf
     urllib.urlretrieve(pdf, os.path.join(args.outdir, fname + '.pdf'))
-
-#for x in strong:
-#    getTracks(compare(x, gnovel), gtex)
-#print getTracks(compare(strong[0], gnovel), all_gtex)
-
-#for st in strong[2:]:
-#    logging.debug('Analyzing strong novel case: {}'.format(st))
-#    res = detectSwitch(st, all_gtex, utrs, gnovel)
-#    if res:
-#        best_match = compare(st, gnovel)
-#        try:
-#            pas = [int(x) for x in best_match[15][1:-1].split(', ')]
-#        except (ValueError, IndexError) as e:
-#            pas = None
-#        novel_track = 'track name="Novel Site" description="Novel site {}" color="255,50,50" visibility=full\n'.format(st[2])
-#        novel_track += '{}\t{}\t{}\t{}\n'.format(st[0], st[2], int(st[2])+1, int(best_match[17]) + int(best_match[18]))
-#        ccle = generateCcleTracks(best_match[0])
-#        gtex = generateGtexTracks(res[2])
-#        kleat = generateKleatTrack(best_match[0], best_match[10])
-#        browser = generateBrowserTrack(best_match[4], int(best_match[6]))
-#        pas_track = ''
-#        if pas:
-#            pas_track = 'track name={}_pas description="{}" color="255,0,0" visibility=full\n'.format(best_match[0], pas)
-#            pas_track += '{}\t{}\t{}\n'.format(st[0], pas[0], pas[0]+6)
-#        to_write = browser + ccle + pas_track + kleat + novel_track + gtex
-#        fname = '{}_{}_{}'.format(st[0], st[1], st[2])
-#        with open(os.path.join(webdir, fname), 'w') as f:
-#            f.write(to_write)
-#        print 'http://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&hgt.customText=http://bcgsc.ca/downloads/dmacmillan/{}'.format(fname)
-
-    #if res:
-    #    getTracks(compare(x, gnovel), all_gtex)
-#detectSwitch(strong[0], all_gtex, utrs, gnovel)
