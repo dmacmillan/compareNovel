@@ -9,6 +9,7 @@ parser.add_argument('all_novel', help='A file containing information for all the
 parser.add_argument('strong_novel', help='A file containing novel sites and their relative frequencies')
 parser.add_argument('gtex_list', help='File containing information on selected GTEX samples')
 parser.add_argument('kleats_filtered', nargs='+', help='Filtered KLEAT files')
+parser.add_argument('-t', '--threshold', type=int, default=100, help='The minimum difference between medians of 3\'UTR regions (as divided by novel site) to be reported. Default = 100')
 parser.add_argument('-a', '--annotation', default='/projects/dmacmillanprj2/polya/ccle/novel_cleavage_events/pysam_version/with_utr3/ucsc.utr3.gtf', help='UCSC-downloaded annotation file')
 parser.add_argument("-l", "--log", dest="logLevel", default='WARNING', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help='Set the logging level. Default = "WARNING"')
 parser.add_argument('-n', '--name', default='result', help='Name for the file output. Default is "result"')
@@ -18,6 +19,12 @@ args = parser.parse_args()
 
 filtered_kleats_path = '/projects/dmacmillanprj2/polya/ccle/filteredKleats/kleats_plus_added'
 webdir = '/gsc/www/bcgsc.ca/downloads/dmacmillan/'
+
+def getGtexCram(name):
+    return '/projects/btl/polya/gtex/star/crams/{}.star.cram'.format(name)
+
+def getCcleCram(name):
+    return '/projects/btl/polya/sorted_star_ccle/cram_sorted_{}.cram'.format(name)
 
 if not os.path.isdir(args.outdir):
     try:
@@ -37,12 +44,12 @@ with open(args.gtex_list, 'r') as f:
     all_gtex = [x.strip().split('\t') for x in f.readlines()]
 
 with open(args.all_novel) as f:
-    novel = [x.strip().split('\t') for x in f.readlines()]
-    novel = novel[1:]
+    all_novel = [x.strip().split('\t') for x in f.readlines()]
+    all_novel = all_novel[1:]
 
 gnovel = {}
 
-for i in novel:
+for i in all_novel:
     if i[4] not in gnovel:
         gnovel[i[4]] = {}
     if i[5] not in gnovel[i[4]]:
@@ -74,20 +81,28 @@ def getClosestUtr3(site, utrs):
 def detectSwitch(site, all_gtex, utrs, gnovel):
     logging.debug('Detecting switch for {} ...'.format(site))
     best_site = compare(site, gnovel)
+    logging.debug('Best site: {}'.format(best_site))
     chrom = best_site[4]
     closest_utr3 = getClosestUtr3(best_site, utrs)
+    logging.debug('Closest UTR3: {}'.format(closest_utr3))
     #print closest_utr3
     cs = int(best_site[6])
+    logging.debug('Novel site from best_match: {}'.format(cs))
     if not (int(closest_utr3[3]) < cs < int(closest_utr3[4])):
         return None
     left = [int(closest_utr3[3]), cs]
+    logging.debug('Left region: {}-{}'.format(left[0], left[1]))
     right = [cs, int(closest_utr3[4])]
+    logging.debug('Right region: {}-{}'.format(right[0], right[1]))
     ccle_aln = pysam.AlignmentFile('/projects/btl/polya/sorted_star_ccle/cram_sorted_{}.cram'.format(best_site[0]), 'rc')
-    ccle_exp_left = ccle_aln.count(chrom, left[0], left[1])
-    ccle_exp_right = ccle_aln.count(chrom, right[0], right[1])
+    ccle_exp_left = ccle_aln.count(chrom, left[0], left[1]) / (left[1] - left[0])
+    logging.debug('Exp left: {}'.format(ccle_exp_left))
+    ccle_exp_right = ccle_aln.count(chrom, right[0], right[1]) / (right[1] - right[0])
+    logging.debug('Exp right: {}'.format(ccle_exp_right))
     ccle_diff = ccle_exp_left - ccle_exp_right
-    logging.debug('Looking through gtex ...')
+    logging.debug('CCLE diff (left - right): {}'.format(ccle_diff))
     for g in all_gtex:
+        logging.debug('Comparing to GTEX {}'.format(g))
         #sprint('\r{}'.format(('\t').join([str(x) for x in g])))
         try:
             gtex_aln = pysam.AlignmentFile('/projects/btl/polya/gtex/star/crams/{}.star.cram'.format(g[2]), 'rc')
@@ -99,14 +114,18 @@ def detectSwitch(site, all_gtex, utrs, gnovel):
             #pysam.index(gtex_aln.filename)
             #gtex_aln = pysam.AlignmentFile('/projects/btl/polya/gtex/star/crams/{}.star.cram'.format(g[2]), 'rc')
         gtex_exp_left = gtex_aln.count(chrom, left[0], left[1])
+        logging.debug('Exp left: {}'.format(gtex_exp_left))
         gtex_exp_right = gtex_aln.count(chrom, right[0], right[1])
+        logging.debug('Exp right: {}'.format(gtex_exp_right))
         gtex_diff = gtex_exp_left - gtex_exp_right
+        logging.debug('GTEX diff (left - right): {}'.format(gtex_diff))
         #print '-'*20
         #print ccle_diff
         #print gtex_diff
         #print '-'*20
         if ((ccle_diff <= 0) and (gtex_diff >= 0)) or ((ccle_diff >= 0) and (gtex_diff <= 0)):
-            raw_input('Pausing...')
+            #raw_input('Pausing...')
+            logging.debug('Found difference in {}'.format(g))
             return g
     return None
         
@@ -143,48 +162,6 @@ def pickGtex(bs, gtex, exclude=[]):
         shutil.copy('/projects/btl/polya/gtex_bigwigs/{}.bw'.format(picked[2]), '/gsc/www/bcgsc.ca/downloads/dmacmillan/')
     picked_track = 'track type=bigWig name={} description="bigwig track for {}" color="{}" visibility=full bigDataUrl={}\n'.format(picked[2], picked[2], picked_colour, picked_url)
     return picked, picked_track
-
-def getTracks(bs, all_gtex, window=2000):
-    try:
-        pas = [int(x) for x in bs[15][1:-1].split(', ')]
-    except IndexError as e:
-        pas = None
-    chrom = bs[4]
-    start = int(bs[6]) - window
-    end = int(bs[6]) + window
-    strength = int(bs[16]) + int(bs[17]) + int(bs[18]) + int(bs[19])
-    name = bs[0]
-    strand = bs[10]
-    if strand == '-':
-        kleat_track = '/projects/btl/polya/ccle/{}/kleat/{}.minus.bg'.format(name, name)
-    else:
-        kleat_track = '/projects/btl/polya/ccle/{}/kleat/{}.plus.bg'.format(name, name)
-    kleat_track = filterKleatTrack(kleat_track)
-    colour = '{},{},{}'.format(random.randint(0,255),random.randint(0,255),random.randint(0,255))
-    description='{}_bigwig'.format(name)
-    readman_loc='/projects/btl/polya/ccle_bigwigs/{}.bw'.format(name)
-    bigDataUrl='http://bcgsc.ca/downloads/dmacmillan/{}.bw'.format(name)
-    browser = 'browser position {}:{}-{}\n'.format(chrom, start, end)
-    browser += 'browser hide all\n'
-    browser += 'browser pack knownGene\n'
-    browser += 'browser pack refGene\n'
-    browser += 'browser pack acembly\n'
-    browser += 'browser pack ensGene\n'
-    bigwig_track = 'track type=bigWig name={} description="{}" color="{}" visibility=full bigDataUrl={}\n'.format(name, description, colour, bigDataUrl)
-    novel_track = 'track type=bedGraph name={}_novel_site description="Novel cleavage event at {}" color="0,0,255" visibility=full\n'.format(name, bs[6])
-    novel_track += ('\t').join([chrom, bs[6], str(int(bs[6])+1), str(strength)]) + '\n'
-    gtex, gtex_track = pickGtex(bs, all_gtex)
-    if not os.path.isfile('/gsc/www/bcgsc.ca/downloads/dmacmillan/{}.bw'.format(name)):    
-        shutil.copy(readman_loc, '/gsc/www/bcgsc.ca/downloads/dmacmillan/')
-    output = '/gsc/www/bcgsc.ca/downloads/dmacmillan/{}_{}'.format(name, bs[6])
-    with open(output, 'w') as f:
-        f.write(browser + bigwig_track + novel_track + gtex_track)
-        if pas:
-            pas_track = 'track name={}_pas description="PAS with Strength {} and position {}" color="255,0,0" visibility=full\n'.format(name, pas[1], pas[0])
-            pas_track += '{}\t{}\t{}\n'.format(chrom, pas[0], pas[0]+6)
-            f.write(pas_track)
-    #return output
-    return 'http://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&hgt.customText=http://bcgsc.ca/downloads/dmacmillan/{}_{}'.format(name, bs[6])
 
 def generateKleatTrack(ccle_id, strand):
     webdir = '/gsc/www/bcgsc.ca/downloads/dmacmillan/'
@@ -228,9 +205,6 @@ def generateGtexTracks(*gtexs):
         result += track_line
     return result
 
-def filterKleatTrack(kleat_track):
-    return None
-
 def generateBrowserTrack(chrom, cs, window = 2000):
     start = cs - window
     end = cs + window
@@ -242,33 +216,112 @@ def generateBrowserTrack(chrom, cs, window = 2000):
     browser += 'browser pack ensGene\n'
     return browser
 
+window = 20
+clusters = []
+for chrom in gnovel:
+    for gene in gnovel[chrom]:
+        cluster = {'centroid': None, 'sites': []}
+        for nov in gnovel[chrom][gene]:
+            cs = int(nov[6])
+            if not cluster['centroid']:
+                cluster['centroid'] = cs
+                cluster['sites'].append(nov)
+                continue
+            dist = abs(cluster['centroid'] - cs)
+            if dist <= 20:
+                cluster['sites'].append(nov)
+                cluster['centroid'] = sum([int(x[6]) for x in cluster['sites']]) / len(cluster['sites'])
+                continue
+            else:
+                clusters.append(cluster)
+                break
+
+clusters = sorted(clusters, key=lambda x: len(x['sites']), reverse=True)
+
+def getMedian(array):
+    length = len(array)
+    if (length == 0):
+        return 'N/A'
+    elif (length % 2 == 0):
+        return ((array[length/2]) + (array[(length/2)-1]))/float(2)
+    else:
+        return array[length/2]
+
+def getMedianCoverage(pysam_alignment_file_object, chrom, start, end):
+    ns = []
+    for p in pysam_alignment_file_object.pileup(chrom, start, end, truncate=True):
+        ns.append(p.n)
+    median = getMedian(ns)
+    return median
+
+for clust in clusters:
+    clust['best_site'] = None
+    clust['best_score'] = 0
+    for i,site in enumerate(clust['sites']):
+        try:
+            score = (int(site[16]) + int(site[17]) + int(site[18]) + int(site[19])) / int(site[15][1])
+        except (ValueError, IndexError) as e:
+            score = (int(site[16]) + int(site[17]) + int(site[18]) + int(site[19]))
+        clust['sites'][i].append(score)
+        if score > clust['best_score']:
+            clust['best_site'] = site
+            clust['best_score'] = score
+    logging.debug('Best site: {}'.format(clust['best_site']))
+    closest_utr3 = getClosestUtr3(clust['best_site'], utrs)
+    logging.debug('Closest utr3: {}'.format(closest_utr3))
+    name = clust['best_site'][0]
+    chrom = clust['best_site'][4]
+    cs = int(clust['best_site'][6])
+    utr3_start = int(closest_utr3[3])
+    utr3_end = int(closest_utr3[4])
+    if (utr3_start >= cs) or (utr3_end <= cs):
+        continue
+    #print '-'*(cs-utr3_start) + '|' + '-'*(utr3_end-cs)
+    ccle_aln = pysam.AlignmentFile(getCcleCram(name), 'rc')
+    left = getMedianCoverage(ccle_aln, chrom, utr3_start, cs)
+    right = getMedianCoverage(ccle_aln, chrom, cs, utr3_end)
+    diff = abs(left - right)
+    if diff <= args.threshold:
+        continue
+    novel_track = 'track name="Novel Site" description="Novel site {}" color="255,50,50" visibility=full\n'.format(cs)
+    novel_track += '{}\t{}\t{}\t{}\n'.format(chrom, cs-1, cs, clust['best_score'])
+    regions_track = 'track name="UTR3 Regions" description="Regions of UTR3" visibility=full\n'
+    regions_track += '{}\t{}\t{}\t{}\n'.format(chrom, utr3_start, cs, left)
+    regions_track += '{}\t{}\t{}\t{}\n'.format(chrom, cs, utr3_end, right)
+    to_write = generateBrowserTrack(chrom, cs) + generateCcleTracks(name) + novel_track + regions_track
+    fname = '{}_{}'.format(name, cs)
+    with open(os.path.join(webdir, fname), 'w') as f:
+        f.write(to_write)
+    print 'http://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&hgt.customText=http://bcgsc.ca/downloads/dmacmillan/{}'.format(fname)
+
 #for x in strong:
 #    getTracks(compare(x, gnovel), gtex)
 #print getTracks(compare(strong[0], gnovel), all_gtex)
 
-for st in strong[2:]:
-    res = detectSwitch(st, all_gtex, utrs, gnovel)
-    if res:
-        best_match = compare(st, gnovel)
-        try:
-            pas = [int(x) for x in best_match[15][1:-1].split(', ')]
-        except (ValueError, IndexError) as e:
-            pas = None
-        novel_track = 'track name="Novel Site" description="Novel site {}" color="255,50,50" visibility=full\n'.format(st[2])
-        novel_track += '{}\t{}\t{}\t{}\n'.format(st[0], st[2], int(st[2])+1, st[3])
-        ccle = generateCcleTracks(best_match[0])
-        gtex = generateGtexTracks(res[2])
-        kleat = generateKleatTrack(best_match[0], best_match[10])
-        browser = generateBrowserTrack(best_match[4], int(best_match[6]))
-        pas_track = ''
-        if pas:
-            pas_track = 'track name={}_pas description="{}" color="255,0,0" visibility=full\n'.format(best_match[0], pas)
-            pas_track += '{}\t{}\t{}\n'.format(st[0], pas[0], pas[0]+6)
-        to_write = browser + ccle + pas_track + kleat + novel_track + gtex
-        fname = '{}_{}_{}'.format(st[0], st[1], st[2])
-        with open(os.path.join(webdir, fname), 'w') as f:
-            f.write(to_write)
-        print 'http://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&hgt.customText=http://bcgsc.ca/downloads/dmacmillan/{}'.format(fname)
+#for st in strong[2:]:
+#    logging.debug('Analyzing strong novel case: {}'.format(st))
+#    res = detectSwitch(st, all_gtex, utrs, gnovel)
+#    if res:
+#        best_match = compare(st, gnovel)
+#        try:
+#            pas = [int(x) for x in best_match[15][1:-1].split(', ')]
+#        except (ValueError, IndexError) as e:
+#            pas = None
+#        novel_track = 'track name="Novel Site" description="Novel site {}" color="255,50,50" visibility=full\n'.format(st[2])
+#        novel_track += '{}\t{}\t{}\t{}\n'.format(st[0], st[2], int(st[2])+1, int(best_match[17]) + int(best_match[18]))
+#        ccle = generateCcleTracks(best_match[0])
+#        gtex = generateGtexTracks(res[2])
+#        kleat = generateKleatTrack(best_match[0], best_match[10])
+#        browser = generateBrowserTrack(best_match[4], int(best_match[6]))
+#        pas_track = ''
+#        if pas:
+#            pas_track = 'track name={}_pas description="{}" color="255,0,0" visibility=full\n'.format(best_match[0], pas)
+#            pas_track += '{}\t{}\t{}\n'.format(st[0], pas[0], pas[0]+6)
+#        to_write = browser + ccle + pas_track + kleat + novel_track + gtex
+#        fname = '{}_{}_{}'.format(st[0], st[1], st[2])
+#        with open(os.path.join(webdir, fname), 'w') as f:
+#            f.write(to_write)
+#        print 'http://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&hgt.customText=http://bcgsc.ca/downloads/dmacmillan/{}'.format(fname)
 
     #if res:
     #    getTracks(compare(x, gnovel), all_gtex)
