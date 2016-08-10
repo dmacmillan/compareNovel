@@ -2,6 +2,9 @@ import argparse, os, sys, logging
 import random
 import shutil
 import pysam
+import urllib
+import requests
+from bs4 import BeautifulSoup
 
 parser = argparse.ArgumentParser(description='')
 
@@ -280,7 +283,11 @@ for clust in clusters:
     ccle_aln = pysam.AlignmentFile(getCcleCram(name), 'rc')
     left = getMedianCoverage(ccle_aln, chrom, utr3_start, cs)
     right = getMedianCoverage(ccle_aln, chrom, cs, utr3_end)
-    diff = abs(left - right)
+    try:
+        diff = abs(left - right)
+    except TypeError:
+        logging.error('TypeError abs(left - right)\nleft: "{}"\nright: "{}"')
+        diff = 0
     if diff <= args.threshold:
         continue
     novel_track = 'track name="Novel Site" description="Novel site {}" color="255,50,50" visibility=full\n'.format(cs)
@@ -292,7 +299,12 @@ for clust in clusters:
     fname = '{}_{}'.format(name, cs)
     with open(os.path.join(webdir, fname), 'w') as f:
         f.write(to_write)
-    print 'http://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&hgt.customText=http://bcgsc.ca/downloads/dmacmillan/{}'.format(fname)
+    url = 'http://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&hgt.customText=http://bcgsc.ca/downloads/dmacmillan/{}&hgt.psOutput=on'.format(fname)
+    page = requests.get(url)
+    soup = BeautifulSoup(page.content, 'html.parser')
+    pdf = soup.find_all('a')[-7]['href']
+    pdf = 'http://genome.ucsc.edu/cgi-bin/' + pdf
+    urllib.urlretrieve(pdf, os.path.join(args.outdir, fname + '.pdf'))
 
 #for x in strong:
 #    getTracks(compare(x, gnovel), gtex)
