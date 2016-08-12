@@ -9,10 +9,10 @@ from bs4 import BeautifulSoup
 parser = argparse.ArgumentParser(description='')
 
 parser.add_argument('all_novel', help='A file containing information for all the novel sites')
-parser.add_argument('strong_novel', help='A file containing novel sites and their relative frequencies')
-parser.add_argument('gtex_list', help='File containing information on selected GTEX samples')
-parser.add_argument('kleats_filtered', nargs='+', help='Filtered KLEAT files')
-parser.add_argument('-t', '--threshold', type=int, default=100, help='The minimum difference between medians of 3\'UTR regions (as divided by novel site) to be reported. Default = 100')
+#parser.add_argument('strong_novel', help='A file containing novel sites and their relative frequencies')
+#parser.add_argument('gtex_list', help='File containing information on selected GTEX samples')
+#parser.add_argument('kleats_filtered', nargs='+', help='Filtered KLEAT files')
+#parser.add_argument('-t', '--threshold', type=int, default=100, help='The minimum difference between medians of 3\'UTR regions (as divided by novel site) to be reported. Default = 100')
 parser.add_argument('-a', '--annotation', default='/projects/dmacmillanprj2/polya/ccle/novel_cleavage_events/pysam_version/with_utr3/ucsc.utr3.gtf', help='UCSC-downloaded annotation file')
 parser.add_argument("-l", "--log", dest="logLevel", default='WARNING', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help='Set the logging level. Default = "WARNING"')
 parser.add_argument('-n', '--name', default='result', help='Name for the file output. Default is "result"')
@@ -22,6 +22,7 @@ args = parser.parse_args()
 
 filtered_kleats_path = '/projects/dmacmillanprj2/polya/ccle/filteredKleats/kleats_plus_added'
 webdir = '/gsc/www/bcgsc.ca/downloads/dmacmillan/'
+data_output = open(os.path.join(args.outdir, 'data.compareNovel'), 'w')
 
 def getGtexCram(name):
     return '/projects/btl/polya/gtex/star/crams/{}.star.cram'.format(name)
@@ -36,19 +37,22 @@ if not os.path.isdir(args.outdir):
         pass
 
 # Logging
-logging.basicConfig(filename=os.path.join(args.outdir, 'compareNovel.log'), level=getattr(logging, args.logLevel))
+logging.basicConfig(filename=os.path.join(args.outdir, 'log.compareNovel'), level=getattr(logging, args.logLevel))
 
 novel = strong = gtex = utrs = None
 
 with open(args.annotation, 'r') as f:
     utrs = [x.strip().split('\t') for x in f.readlines()]
 
-with open(args.gtex_list, 'r') as f:
-    all_gtex = [x.strip().split('\t') for x in f.readlines()]
+#with open(args.gtex_list, 'r') as f:
+#    all_gtex = [x.strip().split('\t') for x in f.readlines()]
 
 with open(args.all_novel) as f:
     all_novel = [x.strip().split('\t') for x in f.readlines()]
     all_novel = all_novel[1:]
+
+all_ccle_samples = set([x[0] for x in all_novel])
+#all_gtex_samples = set([x[0] for x in all_gtex[2]])
 
 gnovel = {}
 
@@ -59,8 +63,8 @@ for i in all_novel:
         gnovel[i[4]][i[5]] = []
     gnovel[i[4]][i[5]].append(i)
 
-with open(args.strong_novel) as f:
-    strong = [x.strip().split('\t') for x in f.readlines()]
+#with open(args.strong_novel) as f:
+#    strong = [x.strip().split('\t') for x in f.readlines()]
     #strong = strong[1:]
 
 def sprint(text):
@@ -257,6 +261,11 @@ def getMedianCoverage(pysam_alignment_file_object, chrom, start, end):
     median = getMedian(ns)
     return median
 
+centroids = {}
+data_output.write(('\t').join(['CHROM', 'GENE', 'STRAND', 'TISSUE', 'DIST_FROM_ANNOT',
+                               'PAS', 'ID', 'CELL_LINE', 'CLEAVAGE_SITE_CENTROID',
+                               'SCORE', 'MEDIAN_LEFT', 'MEDIAN_RIGHT',
+                               'MED_DIFF', 'CLOSEST_UTR3_ATTR']))
 for clust in clusters:
     clust['best_site'] = None
     clust['best_score'] = 0
@@ -272,53 +281,89 @@ for clust in clusters:
         if score > clust['best_score']:
             clust['best_site'] = site
             clust['best_score'] = score
-    if not clust['best_site']:
-        logging.debug('Skipped because no best site')
-        continue
-    logging.debug('Best site: {}'.format(clust['best_site']))
-    closest_utr3 = getClosestUtr3(clust['best_site'], utrs)
-    if not closest_utr3:
-        logging.debug('Skipped because no close utr3')
-        continue
-    logging.debug('Closest utr3: {}'.format(closest_utr3))
-    name = clust['best_site'][0]
-    chrom = clust['best_site'][4]
-    cs = int(clust['best_site'][6])
-    strand = clust['best_site'][10]
-    utr3_start = int(closest_utr3[3])
-    utr3_end = int(closest_utr3[4])
-    if (utr3_start >= cs) or (utr3_end <= cs):
-        logging.debug('Skipped because cs not within utr3')
-        continue
-    #print '-'*(cs-utr3_start) + '|' + '-'*(utr3_end-cs)
-    ccle_aln = pysam.AlignmentFile(getCcleCram(name), 'rc')
-    left = getMedianCoverage(ccle_aln, chrom, utr3_start, cs)
-    right = getMedianCoverage(ccle_aln, chrom, cs, utr3_end)
-    if strand == '-':
-        temp = right
-        right = left
-        left = temp
-    try:
-        diff = left - right
-    except TypeError:
-        logging.error('TypeError abs(left - right)\nleft: "{}"\nright: "{}"'.format(left, right))
-        diff = 0
-    logging.debug('diff: {}'.format(diff))
-    if diff <= args.threshold:
-        logging.debug('Skipped because diff is too low')
-        continue
-    novel_track = 'track name="Novel Site" description="Novel site {}" color="255,50,50" visibility=full\n'.format(cs)
-    novel_track += '{}\t{}\t{}\t{}\n'.format(chrom, cs-1, cs, clust['best_score'])
-    regions_track = 'track name="UTR3 Regions" description="Regions of UTR3" visibility=full\n'
-    regions_track += '{}\t{}\t{}\t{}\n'.format(chrom, utr3_start, cs, left)
-    regions_track += '{}\t{}\t{}\t{}\n'.format(chrom, cs, utr3_end, right)
-    to_write = generateBrowserTrack(chrom, cs) + generateCcleTracks(name) + novel_track + regions_track
-    fname = '{}_{}'.format(name, cs)
-    with open(os.path.join(webdir, fname), 'w') as f:
-        f.write(to_write)
-    url = 'http://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&hgt.customText=http://bcgsc.ca/downloads/dmacmillan/{}&hgt.psOutput=on'.format(fname)
-    page = requests.get(url)
-    soup = BeautifulSoup(page.content, 'html.parser')
-    pdf = soup.find_all('a')[-7]['href']
-    pdf = 'http://genome.ucsc.edu/cgi-bin/' + pdf
-    urllib.urlretrieve(pdf, os.path.join(args.outdir, fname + '.pdf'))
+        clust['best_score'] = score
+        clust['best_site'] = site
+        if not clust['best_site']:
+            logging.debug('Skipped because no best site')
+            continue
+        logging.debug('Best site: {}'.format(clust['best_site']))
+        closest_utr3 = getClosestUtr3(clust['best_site'], utrs)
+        if not closest_utr3:
+            logging.debug('Skipped because no close utr3')
+            continue
+        logging.debug('Closest utr3: {}'.format(closest_utr3))
+        name = clust['best_site'][0]
+        cline = clust['best_site'][1]
+        annot_dist = clust['best_site'][11]
+        pas = clust['best_site'][15]
+        tissue = clust['best_site'][2]
+        chrom = clust['best_site'][4]
+        gene = clust['best_site'][5]
+        cs = int(clust['best_site'][6])
+        strand = clust['best_site'][10]
+        utr3_start = int(closest_utr3[3])
+        utr3_end = int(closest_utr3[4])
+        if (utr3_start >= cs) or (utr3_end <= cs):
+            logging.debug('Skipped because cs not within utr3')
+            continue
+        #print '-'*(cs-utr3_start) + '|' + '-'*(utr3_end-cs)
+        ccle_aln = pysam.AlignmentFile(getCcleCram(name), 'rc')
+        left = getMedianCoverage(ccle_aln, chrom, utr3_start, cs)
+        right = getMedianCoverage(ccle_aln, chrom, cs, utr3_end)
+        if strand == '-':
+            temp = right
+            right = left
+            left = temp
+        try:
+            diff = left - right
+        except TypeError:
+            logging.error('TypeError abs(left - right)\nleft: "{}"\nright: "{}"'.format(left, right))
+            diff = 0
+        logging.debug('diff: {}'.format(diff))
+        #if diff <= args.threshold:
+        #    logging.debug('Skipped because diff is too low')
+        #    continue
+        data = [chrom, gene, strand, tissue, annot_dist, pas, name, cline, clust['centroid'], clust['best_score'], left, right, diff, closest_utr3[8]]
+        data_output.write('\t'.join([str(x) for x in data]) + '\n')
+        #if clust['centroid'] not in centroids:
+        #    centroids[clust['centroid']] = []
+        #centroids[clust['centroid']].append([chrom, gene, tissue, annot_dist, pas, name, cline])
+
+#print ('\t').join(['CHROM', 'GENE', 'TISSUE', 'DIST_FROM_ANNOT', 'PAS', 'ID', 'CELL_LINE', 'NUM_SAMPLES', 'CLEAVAGE_SITE_CENTROID'])
+#for c in centroids:
+#    tissues = [x[2] for x in centroids[c]]
+#    samples = [x[5] for x in centroids[c]]
+#    for cent in centroids[c]:
+#        if (len(centroids[c]) > 1) and (len(set(tissues)) == 1) and (len(set(samples)) > 1):
+#            cs = cent[8]
+#            name = cent[5]
+#            tiss = cent[2]
+#            novel_track = 'track name="Novel Site" description="Novel site {}" color="255,50,50" visibility=full\n'.format(cs)
+#            novel_track += '{}\t{}\t{}\t{}\n'.format(chrom, cs-1, cs, 1)
+#            to_write = generateBrowserTrack(chrom, cs) + generateCcleTracks(name, random.choice(all_ccle_samples.difference(name))) + generateGtexTracks(random.choice([x for x in all_gtex_samples if x[0] == cent[2]]))
+#            fname = '{}_{}'.format(name, cs)
+#            with open(os.path.join(webdir, fname), 'w') as f:
+#                f.write(to_write)
+#            url = 'http://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&hgt.customText=http://bcgsc.ca/downloads/dmacmillan/{}&hgt.psOutput=on'.format(fname)
+#            page = requests.get(url)
+#            soup = BeautifulSoup(page.content, 'html.parser')
+#            pdf = soup.find_all('a')[-7]['href']
+#            pdf = 'http://genome.ucsc.edu/cgi-bin/' + pdf
+#            urllib.urlretrieve(pdf, os.path.join(args.outdir, fname + '.pdf'))
+
+        #print ('\t').join([str(y) for y in x]) + '\t{}\t{}'.format(len(centroids[c]), c)
+#    novel_track = 'track name="Novel Site" description="Novel site {}" color="255,50,50" visibility=full\n'.format(cs)
+#    novel_track += '{}\t{}\t{}\t{}\n'.format(chrom, cs-1, cs, clust['best_score'])
+#    regions_track = 'track name="UTR3 Regions" description="Regions of UTR3" visibility=full\n'
+#    regions_track += '{}\t{}\t{}\t{}\n'.format(chrom, utr3_start, cs, left)
+#    regions_track += '{}\t{}\t{}\t{}\n'.format(chrom, cs, utr3_end, right)
+#    to_write = generateBrowserTrack(chrom, cs) + generateCcleTracks(name) + novel_track + regions_track
+#    fname = '{}_{}'.format(name, cs)
+#    with open(os.path.join(webdir, fname), 'w') as f:
+#        f.write(to_write)
+#    url = 'http://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&hgt.customText=http://bcgsc.ca/downloads/dmacmillan/{}&hgt.psOutput=on'.format(fname)
+#    page = requests.get(url)
+#    soup = BeautifulSoup(page.content, 'html.parser')
+#    pdf = soup.find_all('a')[-7]['href']
+#    pdf = 'http://genome.ucsc.edu/cgi-bin/' + pdf
+#    urllib.urlretrieve(pdf, os.path.join(args.outdir, fname + '.pdf'))
